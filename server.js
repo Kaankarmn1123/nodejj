@@ -1,93 +1,67 @@
-require('dotenv').config();
 const express = require('express');
 const http = require('http');
-const { Server } = require('socket.io');
+const socketIo = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
-
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('Supabase URL and Anon Key must be provided in environment variables.');
-  process.exit(1);
-}
-
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
+const io = socketIo(server, {
   cors: {
-    origin: '*', // Geliştirme için, daha sonra kısıtlanmalı
-  },
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
 });
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+const PORT = process.env.PORT || 3001;
 
 io.on('connection', (socket) => {
   console.log('a user connected');
 
-  socket.on('joinRoom', ({ roomId, user }) => {
+  socket.on('join-room', async (roomId, userId) => {
     socket.join(roomId);
-    console.log(`user ${user.name} joined room ${roomId}`);
-    
-    // Send success response to the joining user
-    socket.emit('joinRoomSuccess', { roomId, players: [{ id: user.id, name: user.name, score: 0 }] });
-    
-    // Notify other users in the room
-    socket.to(roomId).emit('user-joined', user);
+    socket.to(roomId).emit('user-connected', userId);
 
-    socket.on('drawing', (data) => {
-      socket.to(roomId).emit('drawing', data);
-    });
+    try {
+      const { data, error } = await supabase
+        .from('game_session_players')
+        .insert([{ session_id: roomId, user_id: userId, is_ready: false }]);
+      if (error) throw error;
+    } catch (error) {
+      console.error('Error joining room:', error);
+    }
 
-    socket.on('guess', (guess) => {
-      io.to(roomId).emit('guess', { ...guess, user });
-      
-      // Simple guess validation - in a real game you'd have proper prompts/answers
-      const isCorrect = Math.random() > 0.7; // 30% chance of being correct for demo
-      if (isCorrect) {
-        socket.emit('guessResult', { correct: true, points: 10 });
-        // Update player score and broadcast updated players list
-        socket.to(roomId).emit('playersUpdate', { 
-          players: [{ id: user.id, name: user.name, score: 10 }] 
-        });
-      } else {
-        socket.emit('guessResult', { correct: false, points: 0 });
-      }
-    });
-
-    socket.on('saveRound', async (roundData) => {
+    socket.on('disconnect', async () => {
+      socket.to(roomId).emit('user-disconnected', userId);
       try {
         const { data, error } = await supabase
-          .from('game_rounds')
-          .insert([{ ...roundData, session_id: roomId }]);
-
-        if (error) {
-          console.error('Error saving round:', error);
-          socket.emit('saveRoundError', { message: 'Failed to save round.' });
-        } else {
-          console.log('Round saved successfully:', data);
-          socket.emit('saveRoundSuccess', { message: 'Round saved successfully.' });
-        }
-      } catch (err) {
-        console.error('Unexpected error saving round:', err);
-        socket.emit('saveRoundError', { message: 'An unexpected error occurred.' });
+          .from('game_session_players')
+          .delete()
+          .match({ session_id: roomId, user_id: userId });
+        if (error) throw error;
+      } catch (error) {
+        console.error('Error leaving room:', error);
       }
     });
+  });
 
-    socket.on('clearCanvas', ({ roomId }) => {
-      console.log(`Canvas cleared in room ${roomId} by user ${user.name}`);
-      // Broadcast clear event to all other users in the room
-      socket.to(roomId).emit('canvasCleared');
-    });
-
-    socket.on('disconnect', () => {
-      console.log(`user ${user.name} disconnected from room ${roomId}`);
-      io.to(roomId).emit('user-left', user);
-    });
+  socket.on('start-game', async (roomId) => {
+    try {
+      const { data, error } = await supabase
+        .from('game_sessions')
+        .update({ status: 'in_progress' })
+        .match({ id: roomId });
+      if (error) throw error;
+      io.to(roomId).emit('game-started');
+    } catch (error) {
+      console.error('Error starting game:', error);
+    }
   });
 });
 
-const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
